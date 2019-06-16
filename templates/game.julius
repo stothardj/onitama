@@ -1,0 +1,600 @@
+const canvas = document.getElementById(#{toJSON gameCanvas});
+const ctx = canvas.getContext('2d');
+
+const WIDTH = canvas.width;
+const HEIGHT = canvas.height;
+const BOARD_SIZE = 5;
+const CARD_WIDTH = 190;
+const CARD_HEIGHT = 120;
+const SELECTED_COLOR = '#61c67f';
+const RED = 'red';
+const BLUE = 'blue';
+
+const CARDS = {
+    'monkey': [{'left': 1, 'up': 1},
+	       {'right': 1, 'up': 1},
+	       {'left': 1, 'down': 1},
+	       {'right': 1, 'down': 1}],
+    'ox': [{'up': 1},
+	   {'right': 1},
+	   {'down': 1}],
+    'rabbit': [{'left': 1, 'down': 1},
+	       {'right': 1, 'up': 1},
+	       {'right': 2}],
+    'eel': [{'left': 1, 'up': 1},
+	    {'left': 1, 'down': 1},
+	    {'right': 1}],
+    'crab': [{'left': 2},
+	     {'up': 1},
+	     {'right': 2}]
+};
+
+class Rect {
+    constructor(left, top, right, bottom) {
+	this.left = left;
+	this.top = top;
+	this.right = right;
+	this.bottom = bottom;
+    }
+
+    contains(x, y) {
+	return x >= this.left
+	    && x <= this.right
+	    && y >= this.top
+	    && y <= this.bottom;
+    }
+}
+
+class ClickTarget {
+    constructor(bounds, handler) {
+	this.bounds = bounds;
+	this.handler = handler;
+    }
+
+    contains(x, y) {
+	return this.bounds.contains(x, y);
+    }
+
+    trigger(ev) {
+	return !!this.handler(ev);
+    }
+}
+
+class EventTarget {
+    constructor() {
+	this.listeners = [];
+    }
+
+    listen(callback, ...eventTypes) {
+	this.listeners.push({ callback, eventTypes });
+    }
+
+    dispatch(eventType, data = null) {
+	for (const listener of this.listeners) {
+	    if (listener.eventTypes.includes(eventType)) {
+		listener.callback(eventType, data);
+	    }
+	}
+    }
+}
+
+class Grid {
+    constructor(x, y, size, cells) {
+	this.x = x;
+	this.y = y;
+	this.size = size;
+	this.cells = cells;
+	this.cellSize = size / cells;
+    }
+    
+    canvasX(coordX) {
+	return this.x + this.cellSize * coordX;
+    }
+
+    canvasY(coordY) {
+	return this.y + this.cellSize * coordY;
+    }
+
+    canvasRect(coord) {
+	return new Rect(this.canvasX(coord.x), // left
+			this.canvasY(coord.y), // top
+			this.canvasX(coord.x + 1), //right
+			this.canvasY(coord.y + 1)); // bottom
+    }
+
+    coord(canvasX, canvasY) {
+	return new Coord(
+	    Math.floor((canvasX - this.x) / this.cellSize),
+	    Math.floor((canvasY - this.y) / this.cellSize));
+    }
+
+    draw() {
+	for (let i=1; i<this.cells; i++) {
+	    ctx.beginPath();
+	    ctx.moveTo(this.canvasX(i), this.y);
+	    ctx.lineTo(this.canvasX(i), this.y + this.size);
+	    ctx.stroke();
+	    ctx.beginPath();
+	    ctx.moveTo(this.x, this.canvasY(i));
+	    ctx.lineTo(this.x + this.size, this.canvasY(i));
+	    ctx.stroke();
+	}
+	ctx.strokeRect(this.x, this.y, this.size, this.size);
+    }
+}
+
+const BoardEvents = {
+    BOARD_SELECTED: 'board-selected',
+    PIECE_SELECTED: 'piece-selected',
+};
+
+class Board {
+    constructor(x, y, size) {
+	this.pieces = new Map();
+	this.x = x;
+	this.y = y;
+	this.size = size;
+	this.grid = new Grid(x, y, size, BOARD_SIZE);
+	this.eventTarget = new EventTarget();
+	this.destinationMarker = null;
+    }
+
+    initPieces() {
+	this.pieces.clear();
+	const middle = Math.floor(BOARD_SIZE / 2);
+	const bottom = BOARD_SIZE - 1;
+	this.addPiece(new Coord(middle, 0), new Master(RED));
+	this.addPiece(new Coord(middle, bottom), new Master(BLUE));
+	for (let i=0; i<BOARD_SIZE; i++) {
+	    if (i == middle) continue;
+	    this.addPiece(new Coord(i, 0), new Disciple(RED));
+	    this.addPiece(new Coord(i, bottom), new Disciple(BLUE));
+	}
+    }
+
+    addPiece(coord, piece) {
+	this.pieces.set(coord.toKey(), piece);
+    }
+
+    movePiece(from, to) {
+	const piece = this.pieces.get(from.toKey());
+	this.pieces.delete(from.toKey());
+	this.pieces.set(to.toKey(), piece);
+    }
+
+    goalFor(turn) {
+	const goalX = Math.floor(BOARD_SIZE / 2);
+	const goalY = turn == RED ? (BOARD_SIZE - 1) : 0;
+	return new Coord(goalX, goalY);
+    }
+
+    draw() {
+	ctx.lineWidth = 1;
+	ctx.strokeStyle = '#000000';
+	this.grid.draw();
+
+	if (this.destinationMarker) {
+	    ctx.fillStyle = SELECTED_COLOR;
+	    const rect = this.grid.canvasRect(this.destinationMarker);
+	    ctx.fillRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+	}
+
+	for (const [coordKey, piece] of this.pieces) {
+	    const coord = Coord.fromKey(coordKey);
+	    piece.draw(this.grid.canvasX(coord.x), this.grid.canvasY(coord.y), this.grid.cellSize);
+	}
+    }
+
+    getClickTargets() {
+	const targets = [];
+	for (const [coordKey, piece] of this.pieces) {
+	    const coord = Coord.fromKey(coordKey);
+	    targets.push(new ClickTarget(
+		this.grid.canvasRect(coord),
+		() => this.handleClickPiece(coord)));
+	}
+	targets.push(new ClickTarget(
+	    new Rect(this.x, this.y, this.x + this.size, this.y + this.size),
+	    (ev) => this.handleClickBoard(ev)));
+	return targets;
+    }
+
+    getPiece(coord) {
+	const coordKey = coord.toKey();
+	return this.pieces.get(coordKey);
+    }
+
+    handleClickBoard(ev) {
+	const x = ev.offsetX;
+	const y = ev.offsetY;
+
+	const coord = this.grid.coord(x, y);
+	this.eventTarget.dispatch(BoardEvents.BOARD_SELECTED, {coord});
+    }
+
+    handleClickPiece(coord) {
+	this.eventTarget.dispatch(BoardEvents.PIECE_SELECTED, {coord});
+
+	return false;
+    }
+}
+
+class Coord {
+    constructor(x, y) {
+	this.x = x;
+	this.y = y;
+    }
+
+    toKey() {
+	return this.x + this.y * BOARD_SIZE;
+    }
+
+    moveTo(other) {
+	return new Move(other.x - this.x, other.y - this.y);
+    }
+
+    eq(other) {
+	return this.x == other.x && this.y == other.y;
+    }
+
+    static fromKey(key) {
+	return new Coord(key % BOARD_SIZE, (key / BOARD_SIZE) | 0);
+    }
+}
+
+class Master {
+    constructor(color) {
+	this.color = color;
+	this.selected = false;
+    }
+
+    draw(x, y, size) {
+	if (this.selected) {
+	    ctx.fillStyle = SELECTED_COLOR;
+	    ctx.beginPath();
+	    ctx.arc(x + size / 2, y + size / 2, size / 2, 0, Math.PI * 2);
+	    ctx.fill();
+	}
+	ctx.fillStyle = this.color;
+	ctx.beginPath();
+	ctx.arc(x + size / 2, y + size / 2, size / 2 - 5, 0, Math.PI * 2);
+	ctx.fill();
+    }
+}
+
+class Disciple {
+    constructor(color) {
+	this.color = color;
+	this.selected = false;
+    }
+
+    draw(x, y, size) {
+	if (this.selected) {
+	    ctx.fillStyle = SELECTED_COLOR;
+	    ctx.beginPath();
+	    ctx.arc(x + size / 2, y + size / 2, size / 2, 0, Math.PI * 2);
+	    ctx.fill();
+	}
+	ctx.strokeStyle = this.color;
+	ctx.strokeWidth = 8;
+	ctx.beginPath();
+	ctx.arc(x + size / 2, y + size / 2, size / 2 - 5, 0, Math.PI * 2);
+	ctx.stroke();
+    }
+}
+
+class Move {
+    constructor(right, down) {
+	this.right = right;
+	this.down = down;
+    }
+
+    flip() {
+	return new Move(-this.right, -this.down);
+    }
+
+    eq(move) {
+	return this.right == move.right && this.down == move.down;
+    }
+}
+
+class Card {
+    constructor(name, moves) {
+	this.name = name;
+	this.moves = moves;
+    }
+
+    hasMove(move, flipped) {
+	const mv = flipped ? move.flip() : move;
+	return !!this.moves.find(el => el.eq(mv));
+    }
+
+    draw(x, y, flipped = false) {
+	ctx.save();
+	ctx.translate(x, y);
+	if (flipped) {
+	    ctx.translate(CARD_WIDTH / 2, CARD_HEIGHT / 2);
+	    ctx.rotate(Math.PI);
+	    ctx.translate(- CARD_WIDTH / 2, -CARD_HEIGHT / 2);
+	}
+	ctx.fillStyle = '#ddcc99';
+	ctx.fillRect(0, 0, CARD_WIDTH, CARD_HEIGHT);
+	ctx.strokeStyle = '#000000';
+	ctx.strokeRect(0, 0, CARD_WIDTH, CARD_HEIGHT);
+	ctx.fillStyle = '#000000'
+	ctx.font = '16px serif';
+	ctx.textBaseline = 'middle';
+	ctx.fillText(this.name.toUpperCase(), 5, 60);
+	ctx.fillStyle = '#ffffff';
+	ctx.fillRect(80, 10, 100, 100);
+	ctx.strokeStyle = '#000000';
+	ctx.strokeWidth = 2;
+	const grid = new Grid(80, 10, 100, 5);
+	grid.draw();
+	ctx.fillStyle = '#000000';
+	const middle = 2;
+	ctx.fillRect(grid.canvasX(middle), grid.canvasY(middle), grid.cellSize, grid.cellSize);
+	ctx.fillStyle = '#555555';
+	for (const move of this.moves) {
+	    const x = middle + move.right;
+	    const y = middle + move.down;
+	    ctx.fillRect(grid.canvasX(x), grid.canvasY(y), grid.cellSize, grid.cellSize);
+	}
+	ctx.restore();
+    }
+}
+
+const CardSlotEvents = {
+    CARD_SELECTED: 'card-selected',
+};
+
+class CardSlot {
+    constructor(x, y, player) {
+	this.x = x;
+	this.y = y;
+	this.player = player;
+	this.card = null;
+	this.selected = false;
+	this.clickTarget = new ClickTarget(
+	    new Rect(this.x, this.y, this.x + CARD_WIDTH, this.y + CARD_HEIGHT),
+	    () => this.handleClick());
+	this.eventTarget = new EventTarget();
+    }
+
+    placeCard(card) {
+	this.card = card;
+	return this;
+    }
+
+    draw(turn) {
+	if (!this.card) return;
+	if (this.selected) {
+	    ctx.fillStyle = SELECTED_COLOR;
+	    ctx.fillRect(this.x - 4, this.y - 4, CARD_WIDTH + 8, CARD_HEIGHT + 8);
+	}
+	const flipped = this.player == RED || (this.player == null && turn == RED);
+	this.card.draw(this.x, this.y, flipped);
+    }
+
+    getClickTargets() {
+	return [this.clickTarget];
+    }
+
+    handleClick() {
+	this.eventTarget.dispatch(CardSlotEvents.CARD_SELECTED);
+    }
+}
+
+function getCards() {
+    const cards = [];
+    for (const [name, moves] of Object.entries(CARDS)) {
+	const parsedMoves = [];
+	for (const move of moves) {
+	    const right = move.right || -move.left || 0;
+	    const down = move.down || -move.up || 0;
+	    parsedMoves.push(new Move(right, down));
+	}
+	cards.push(new Card(name, parsedMoves));
+    }
+    return cards;
+}
+
+function nextTurn(turn) {
+    return turn === RED ? BLUE : RED;
+}
+
+class Game {
+    constructor(board, cardSlots, turn) {
+	this.board = board;
+	this.cardSlots = cardSlots;
+	this.turn = turn;
+
+	this.neutralCardSlot = this.cardSlots.find(cardSlot => cardSlot.player == null);
+
+	this.selectedPieceCoord = null;
+	this.selectedCardSlot = null;
+
+	this.board.eventTarget.listen((type, data) => this.pieceSelected(data), BoardEvents.PIECE_SELECTED);
+	this.board.eventTarget.listen((type, data) => this.boardSelected(data), BoardEvents.BOARD_SELECTED);
+	for (const cardSlot of this.cardSlots) {
+	    cardSlot.eventTarget.listen(() => this.cardSlotSelected(cardSlot), CardSlotEvents.CARD_SELECTED);
+	}
+    }
+
+    dealCards(cards) {
+	for (let i=0; i<this.cardSlots.length; i++) {
+	    this.cardSlots[i].placeCard(cards[i]);
+	}
+    }
+
+    draw() {
+	ctx.clearRect(0, 0, WIDTH, HEIGHT);
+	this.board.draw();
+	for (const cardSlot of this.cardSlots) {
+	    cardSlot.draw(this.turn);
+	}
+    }
+
+    getSelectedPiece() {
+	if (this.selectedPieceCoord == null) return null;
+	return this.board.getPiece(this.selectedPieceCoord);
+    }
+
+    selectPieceAt(coord) {
+	this.selectedPieceCoord = coord;
+	this.board.getPiece(coord).selected = true;
+    }
+
+    deselectPiece() {
+	if (this.selectedPieceCoord == null) return;
+	this.board.getPiece(this.selectedPieceCoord).selected = false;
+	this.selectedPieceCoord = null;
+    }
+
+    selectCardSlot(cardSlot) {
+	this.selectedCardSlot = cardSlot;
+	cardSlot.selected = true;
+    }
+
+    deselectCardSlot() {
+	if (this.selectedCardSlot == null) return;
+	this.selectedCardSlot.selected = false;
+	this.selectedCardSlot = null;
+    }
+
+    getClickTargets() {
+	const targets = [];
+	targets.push(...this.board.getClickTargets());
+	for (const cardSlot of this.cardSlots) {
+	    targets.push(...cardSlot.getClickTargets());
+	}
+	return targets;
+    }
+
+    canSelectPiece(piece) {
+	return this.turn == piece.color;
+    }
+    
+    canSelectCardSlot(cardSlot) {
+	return this.turn == cardSlot.player;
+    }
+
+    willWin() {
+	const takenPiece = this.board.getPiece(this.board.destinationMarker);
+	if (takenPiece instanceof Master) return true;
+	const selectedPiece = this.getSelectedPiece();
+	if (!(selectedPiece instanceof Master)) return false;
+	const goal = this.board.goalFor(this.turn);
+	return this.board.destinationMarker.eq(goal);
+    }
+
+    completeMove() {
+	if (this.selectedPieceCoord == null
+	    || this.selectedCardSlot == null
+	    || this.board.destinationMarker == null) {
+	    return false;
+	}
+
+	const move = this.selectedPieceCoord.moveTo(this.board.destinationMarker);
+	// Important to save the piece as a local var so we don't lose track of it
+	// as we move things around.
+	const piece = this.getSelectedPiece();
+	const card = this.selectedCardSlot.card;
+
+	const flipped = this.turn == RED;
+	if (!card.hasMove(move, flipped)) return false;
+
+	if (this.willWin()) {
+	    console.log('this is the winning move');
+	}
+
+	this.board.movePiece(this.selectedPieceCoord, this.board.destinationMarker);
+
+	const neutralCard = this.neutralCardSlot.card;
+
+	this.selectedCardSlot.placeCard(neutralCard);
+	this.neutralCardSlot.placeCard(card);
+
+	// Use the local we saved before we moved things around for setting the
+	// internal selected state to false.
+	piece.selected = false;
+	// No problem with card slot though as it's the slot not the card which
+	// is selected.
+	this.selectedCardSlot.selected = false;
+	this.selectedPieceCoord = null;
+	this.selectedCardSlot = null;
+	this.board.destinationMarker = null;
+	this.turn = nextTurn(this.turn);
+
+	return true;
+    }
+
+    boardSelected(data) {
+	const coord = data.coord;
+	this.board.destinationMarker = coord;
+
+	this.completeMove();
+
+	this.draw();
+    }
+
+    pieceSelected(data) {
+	const coord = data.coord;
+	const piece = this.board.getPiece(coord);
+
+	if (!this.canSelectPiece(piece)) {
+	    this.boardSelected({coord})
+	    return;
+	}
+
+	if (piece.selected) {
+	    this.deselectPiece();
+	} else {
+	    const selectedPiece = this.getSelectedPiece();
+	    if (selectedPiece) selectedPiece.selected = false;
+	    this.selectPieceAt(coord);
+	    this.completeMove();
+	}	    
+	this.draw();
+    }
+
+    cardSlotSelected(cardSlot) {
+	if (!this.canSelectCardSlot(cardSlot)) return;
+
+	if (cardSlot.selected) {
+	    this.deselectCardSlot();
+	} else {
+	    if (this.selectedCardSlot) this.selectedCardSlot.selected = false;
+	    this.selectCardSlot(cardSlot);
+	    this.completeMove();
+	}
+	this.draw();
+    }
+}
+
+const board = new Board(20, 100, 350);
+board.initPieces();
+
+const cardSlots = [
+    new CardSlot(400, 20, RED),
+    new CardSlot(600, 20, RED),
+    new CardSlot(500, 220, null),
+    new CardSlot(400, 460, BLUE),
+    new CardSlot(600, 460, BLUE),
+];
+const cards = getCards();
+
+const game = new Game(board, cardSlots, RED);
+game.dealCards(cards);
+game.draw();
+
+canvas.addEventListener('click', (ev) => {
+    const x = ev.offsetX;
+    const y = ev.offsetY;
+    for (const target of game.getClickTargets()) {
+	if (target.contains(x, y)) {
+	    const bubble = target.trigger(ev);
+	    if (!bubble) break;
+	}
+    }
+});

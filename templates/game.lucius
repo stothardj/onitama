@@ -1,0 +1,9 @@
+##{gameCanvas} {
+    border: 1px solid black;
+}
+
+.game {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
