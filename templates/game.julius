@@ -522,11 +522,12 @@ class Game {
 	return this.board.destinationMarker.eq(goal);
     }
 
+    // Returns the winner, or null if the game is not over yet.
     completeMove() {
 	if (this.selectedPieceCoord == null
 	    || this.selectedCardSlot == null
 	    || this.board.destinationMarker == null) {
-	    return false;
+	    return null;
 	}
 
 	const move = this.selectedPieceCoord.moveTo(this.board.destinationMarker);
@@ -536,10 +537,11 @@ class Game {
 	const card = this.selectedCardSlot.card;
 
 	const flipped = this.turn == RED;
-	if (!card.hasMove(move, flipped)) return false;
+	if (!card.hasMove(move, flipped)) return null;
 
+	let winner = null;
 	if (this.willWin()) {
-	    this.eventTarget.dispatch(GameEvents.GAME_WON, {winner: this.turn});
+	    winner = this.turn;
 	}
 
 	this.board.movePiece(this.selectedPieceCoord, this.board.destinationMarker);
@@ -560,16 +562,22 @@ class Game {
 	this.board.destinationMarker = null;
 	this.turn = nextTurn(this.turn);
 
-	return true;
+	return winner;
+    }
+
+    endGame(winner) {
+	this.eventTarget.dispatch(GameEvents.GAME_WON, {winner});
     }
 
     boardSelected(data) {
 	const coord = data.coord;
 	this.board.destinationMarker = coord;
 
-	this.completeMove();
+	const winner = this.completeMove();
 
 	this.draw();
+
+	if (winner) this.endGame(winner);
     }
 
     pieceSelected(data) {
@@ -581,28 +589,34 @@ class Game {
 	    return;
 	}
 
+	let winner = null;
 	if (piece.selected) {
 	    this.deselectPiece();
 	} else {
 	    const selectedPiece = this.getSelectedPiece();
 	    if (selectedPiece) selectedPiece.selected = false;
 	    this.selectPieceAt(coord);
-	    this.completeMove();
-	}	    
+	    winner = this.completeMove();
+	}
 	this.draw();
+
+	if (winner) this.endGame(winner);
     }
 
     cardSlotSelected(cardSlot) {
 	if (!this.canSelectCardSlot(cardSlot)) return;
 
+	let winner = null;
 	if (cardSlot.selected) {
 	    this.deselectCardSlot();
 	} else {
 	    if (this.selectedCardSlot) this.selectedCardSlot.selected = false;
 	    this.selectCardSlot(cardSlot);
-	    this.completeMove();
+	    winner = this.completeMove();
 	}
 	this.draw();
+
+	if (winner) this.endGame(winner);
     }
 }
 
@@ -639,28 +653,10 @@ class Button {
     }
 }
 
-const TitleScreenEvents = {
-    START_GAME: 'start-game',
-};
-
-class TitleScreen {
+class Screen {
     constructor() {
-	this.eventTarget = new EventTarget();
-	this.newGameButton = new Button('New Game', new Rect(
-	    100, 200, WIDTH - 100, 300));
-	this.newGameButton.eventTarget.listen(() => {
-	    this.eventTarget.dispatch(TitleScreenEvents.START_GAME);
-	}, ButtonEvents.CLICKED);
 	this.clickListener = registerClick.bind(this);
-    }
-    
-    draw() {
-    	ctx.fillStyle = '#000000';
-	ctx.font = '50px serif';
-	ctx.textAlign = 'center';
-	ctx.fillText('Onitama', WIDTH / 2, 100);
-
-	this.newGameButton.draw();
+	this.clickables = [];
     }
     
     addEventListeners() {
@@ -671,9 +667,72 @@ class TitleScreen {
 	canvas.removeEventListener('click', this.clickListener);
     }
 
+    addClickable(child) {
+	this.clickables.push(child);
+	return child;
+    }
 
     getClickTargets() {
-	return this.newGameButton.getClickTargets();
+	let targets = [];
+	for (const child of this.clickables) {
+	    targets = targets.concat(child.getClickTargets());
+	}
+	return targets;
+    }
+}
+
+const TitleScreenEvents = {
+    START_GAME: 'start-game',
+};
+
+class TitleScreen extends Screen {
+    constructor() {
+	super();
+	this.eventTarget = new EventTarget();
+	this.newGameButton = this.addClickable(
+	    new Button('New Game',
+		       new Rect(100, 200, WIDTH - 100, 300)));
+	this.newGameButton.eventTarget.listen(() => {
+	    this.eventTarget.dispatch(TitleScreenEvents.START_GAME);
+	}, ButtonEvents.CLICKED);
+    }
+    
+    draw() {
+	ctx.clearRect(0, 0, WIDTH, HEIGHT);
+    	ctx.fillStyle = '#000000';
+	ctx.font = '50px serif';
+	ctx.textAlign = 'center';
+	ctx.fillText('Onitama', WIDTH / 2, 100);
+
+	this.newGameButton.draw();
+    }
+}
+
+const VictoryScreenEvents = {
+    RETURN_TO_TITLE: 'return-to-title',
+};
+
+class VictoryScreen extends Screen {
+    constructor(winner) {
+	super();
+	this.winner = winner;
+	this.eventTarget = new EventTarget();
+	this.titleButton = this.addClickable(
+	    new Button('Return to Title',
+		       new Rect(100, 200, WIDTH - 100, 300)));
+	this.titleButton.eventTarget.listen(() => {
+	    this.eventTarget.dispatch(VictoryScreenEvents.RETURN_TO_TITLE);
+	}, ButtonEvents.CLICKED);
+    }
+
+    draw() {
+	ctx.clearRect(0, 0, WIDTH, HEIGHT);
+    	ctx.fillStyle = '#000000';
+	ctx.font = '50px serif';
+	ctx.textAlign = 'center';
+	ctx.fillText(`${this.winner} won!`, WIDTH / 2, 100);
+
+	this.titleButton.draw();
     }
 }
 
@@ -711,8 +770,18 @@ class Overview {
 
 	game.eventTarget.listen((type, data) => {
 	    game.removeEventListeners();
-	    console.log(`${data.winner} won!`);
+	    this.displayVictory(data.winner);
 	}, GameEvents.GAME_WON);
+    }
+
+    displayVictory(winner) {
+	const victoryScreen = new VictoryScreen(winner);
+	victoryScreen.draw();
+	victoryScreen.addEventListeners();
+	victoryScreen.eventTarget.listen(() => {
+	    victoryScreen.removeEventListeners();
+	    this.displayTitle();
+	}, VictoryScreenEvents.RETURN_TO_TITLE);
     }
 
     run() {
