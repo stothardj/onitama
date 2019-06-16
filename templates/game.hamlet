@@ -1,5 +1,3 @@
 <div .game>
-  Red
-
   <canvas ##{gameCanvas} width="800" height="600">
-  Blue
+
